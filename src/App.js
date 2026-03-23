@@ -4,6 +4,13 @@ import PayHereCheckout from './components/PayHereCheckout';
 import KafkaEventListener from './components/KafkaEventListener';
 import useKafkaEvents from './hooks/useKafkaEvents';
 import axios from 'axios';
+import apiClient from './api/apiClient';
+import {
+  clearTokens,
+  extractTokens,
+  getAccessToken,
+  setTokens
+} from './utils/authTokens';
 
 function App() {
   const [paymentData, setPaymentData] = useState(null);
@@ -11,11 +18,19 @@ function App() {
   const [error, setError] = useState(null);
   const [kafkaEnabled, setKafkaEnabled] = useState(true);
   const [lastEvent, setLastEvent] = useState(null);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(Boolean(getAccessToken()));
 
   // Replace with your actual backend API endpoint and SignalR Hub URL
-  const BACKEND_API_URL = 'http://localhost:5000/api/payment/create-intent';
+  const BACKEND_API_URL = '/payments/v1/payment/create-intent';
+  const LOGIN_URL = process.env.REACT_APP_LOGIN_URL || '/identity/v1/auth/login';
   // SignalR Hub URL for real-time payment events
-  const SIGNALR_HUB_URL = 'http://localhost:5000/hubs/payment';
+  const SIGNALR_HUB_URL =
+    process.env.REACT_APP_SIGNALR_HUB_URL ||
+    '/payments/v1/hubs/payment';
 
   // Kafka event handler - receives payment intent and automatically redirects to PayHere
   const handleKafkaEvent = useCallback((eventData) => {
@@ -50,7 +65,7 @@ function App() {
     error: kafkaError, 
     sendTestPaymentIntent 
   } = useKafkaEvents(
-    kafkaEnabled ? SIGNALR_HUB_URL : null,
+    isAuthenticated && kafkaEnabled ? SIGNALR_HUB_URL : null,
     'mydrive.v1.payment-intent-created',
     handleKafkaEvent
   );
@@ -61,7 +76,7 @@ function App() {
 
     try {
       // Call your backend API to get payment data
-      const response = await axios.post(BACKEND_API_URL, {
+      const response = await apiClient.post(BACKEND_API_URL, {
         amount: 1000.00,
         currency: 'LKR',
         // Add any other required fields
@@ -76,6 +91,41 @@ function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLogin = async (event) => {
+    event.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      const response = await axios.post(LOGIN_URL, {
+        username,
+        password
+      });
+
+      const tokens = extractTokens(response.data);
+
+      if (!tokens.accessToken || !tokens.refreshToken) {
+        throw new Error('Login response did not contain access and refresh tokens.');
+      }
+
+      setTokens(tokens);
+      setIsAuthenticated(true);
+      setPassword('');
+    } catch (err) {
+      const apiError = err.response?.data?.message;
+      setAuthError(apiError || err.message || 'Login failed.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    clearTokens();
+    setIsAuthenticated(false);
+    setPaymentData(null);
+    setLastEvent(null);
   };
 
   // For testing without backend, you can use mock data
@@ -111,12 +161,58 @@ function App() {
         <h1>PayHere Sandbox Demo</h1>
         <p className="subtitle">Test your PayHere payment integration</p>
 
-        <KafkaEventListener
-          isConnected={isConnected}
-          error={kafkaError}
-          isEnabled={kafkaEnabled}
-          onToggle={() => setKafkaEnabled(!kafkaEnabled)}
-        />
+        {!isAuthenticated && (
+          <form className="login-card" onSubmit={handleLogin}>
+            <h2>Login</h2>
+            <p className="login-help">Authenticate first to call backend APIs and receive protected events.</p>
+
+            <label htmlFor="username">Username</label>
+            <input
+              id="username"
+              className="input"
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+
+            <label htmlFor="password">Password</label>
+            <input
+              id="password"
+              className="input"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={authLoading}
+            >
+              {authLoading ? 'Logging in...' : 'Login'}
+            </button>
+
+            {authError && <div className="error-message"><strong>Login Error:</strong> {authError}</div>}
+          </form>
+        )}
+
+        {isAuthenticated && (
+          <div className="auth-status">
+            <span>Authenticated</span>
+            <button className="btn btn-logout" onClick={handleLogout}>Logout</button>
+          </div>
+        )}
+
+        {isAuthenticated && (
+          <KafkaEventListener
+            isConnected={isConnected}
+            error={kafkaError}
+            isEnabled={kafkaEnabled}
+            onToggle={() => setKafkaEnabled(!kafkaEnabled)}
+          />
+        )}
 
         {lastEvent && (
           <div className="event-notification">
@@ -124,7 +220,7 @@ function App() {
           </div>
         )}
 
-        {!paymentData ? (
+        {isAuthenticated && !paymentData ? (
           <div className="button-group">
             <button 
               onClick={handleCreatePayment} 
@@ -150,12 +246,14 @@ function App() {
               </button>
             )}
           </div>
-        ) : (
+        ) : null}
+
+        {isAuthenticated && paymentData ? (
           <PayHereCheckout 
             paymentData={paymentData}
             onBack={() => setPaymentData(null)}
           />
-        )}
+        ) : null}
 
         {error && (
           <div className="error-message">
@@ -166,6 +264,7 @@ function App() {
         <div className="info-box">
           <h3>Setup Instructions:</h3>
           <ol>
+            <li>Update LOGIN_URL (`REACT_APP_LOGIN_URL`) and refresh endpoint (`REACT_APP_REFRESH_URL`) if needed</li>
             <li>Update the BACKEND_API_URL with your actual API endpoint</li>
             <li>For testing, use the "Mock Data" button</li>
             <li>Replace merchant_id with your PayHere merchant ID</li>
