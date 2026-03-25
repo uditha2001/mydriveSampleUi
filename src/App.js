@@ -1,105 +1,98 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import './App.css';
 import PayHereCheckout from './components/PayHereCheckout';
-import KafkaEventListener from './components/KafkaEventListener';
-import useKafkaEvents from './hooks/useKafkaEvents';
 import axios from 'axios';
 
 function App() {
   const [paymentData, setPaymentData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [kafkaEnabled, setKafkaEnabled] = useState(true);
-  const [lastEvent, setLastEvent] = useState(null);
 
-  // Replace with your actual backend API endpoint and SignalR Hub URL
-  const BACKEND_API_URL = 'http://localhost:5000/api/payment/create-intent';
-  // SignalR Hub URL for real-time payment events
-  const SIGNALR_HUB_URL = 'http://localhost:5000/hubs/payment';
-
-  // Kafka event handler - receives payment intent and automatically redirects to PayHere
-  const handleKafkaEvent = useCallback((eventData) => {
-    console.log('====== KAFKA EVENT RECEIVED ======');
-    console.log('Received payment intent event:', eventData);
-    console.log('Event structure:', JSON.stringify(eventData, null, 2));
-    setLastEvent(new Date().toLocaleTimeString());
-
-    // Extract payment data from event and redirect to PayHere checkout
-    if (eventData.payload && eventData.payload.GatewayData) {
-      console.log('✅ Payment intent received, setting paymentData...');
-      console.log('GatewayData to set:', eventData.payload.GatewayData);
-      setPaymentData(eventData.payload.GatewayData);
-      setError(null);
-      console.log('PaymentData state updated - should redirect to PayHere now');
-    } else if (eventData.GatewayData) {
-      console.log('✅ Payment intent received (direct GatewayData), setting paymentData...');
-      console.log('GatewayData to set:', eventData.GatewayData);
-      setPaymentData(eventData.GatewayData);
-      setError(null);
-      console.log('PaymentData state updated - should redirect to PayHere now');
-    } else {
-      console.warn('Unexpected event structure:', eventData);
-      console.warn('Missing GatewayData in payload');
+  const createGuid = () => {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
     }
-  }, []);
 
-  // Connect to SignalR to listen for payment intent created events
-  // When event is received, automatically redirect to PayHere checkout
-  const { 
-    isConnected, 
-    error: kafkaError, 
-    sendTestPaymentIntent 
-  } = useKafkaEvents(
-    kafkaEnabled ? SIGNALR_HUB_URL : null,
-    'mydrive.v1.payment-intent-created',
-    handleKafkaEvent
-  );
+    // Fallback GUID format for older browsers
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  };
+
+  const [requestForm, setRequestForm] = useState({
+    OrderId: `ORDER_${Date.now()}`,
+    CustomerId: createGuid(),
+    MerchantId: createGuid(),
+    Amount: '1000.00',
+    PaymentGatewayName: 'PAYHERE',
+    Currency: 'LKR',
+  });
+
+  const handleFormChange = (event) => {
+    const { name, value } = event.target;
+    setRequestForm((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  const fillDummyData = () => {
+    setRequestForm({
+      OrderId: `ORDER_${Date.now()}`,
+      CustomerId: createGuid(),
+      MerchantId: createGuid(),
+      Amount: '1000.00',
+      PaymentGatewayName: 'PAYHERE',
+      Currency: 'LKR',
+    });
+  };
 
   const handleCreatePayment = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // Call your backend API to get payment data
-      const response = await axios.post(BACKEND_API_URL, {
-        amount: 1000.00,
-        currency: 'LKR',
-        // Add any other required fields
-      });
+      const requestBody = {
+        OrderId: requestForm.OrderId.trim(),
+        CustomerId: requestForm.CustomerId.trim(),
+        MerchantId: requestForm.MerchantId.trim(),
+        Amount: Number(requestForm.Amount),
+        PaymentGatewayName: requestForm.PaymentGatewayName.trim() || 'PAYHERE',
+        Currency: requestForm.Currency.trim() || 'LKR',
+      };
 
-      // The response should contain the GatewayData from your backend
-      const { GatewayData } = response.data;
-      setPaymentData(GatewayData);
+      if (!requestBody.OrderId || !requestBody.CustomerId || !requestBody.MerchantId) {
+        throw new Error('OrderId, CustomerId, and MerchantId are required');
+      }
+
+      if (Number.isNaN(requestBody.Amount) || requestBody.Amount <= 0) {
+        throw new Error('Amount must be a valid number greater than zero');
+      }
+
+      // Direct API call to POST /v1/payments/paymentIntentCreate
+      const response = await axios.post(
+        'http://localhost:8085/v1/payments/paymentIntentCreate',
+        requestBody
+      );
+
+      const gatewayData =
+        response.data?.GatewayData ||
+        response.data?.gatewayData ||
+        response.data;
+
+      if (!gatewayData || typeof gatewayData !== 'object') {
+        throw new Error('Invalid payment response format');
+      }
+
+      setPaymentData(gatewayData);
     } catch (err) {
-      setError(err.message || 'Failed to create payment intent');
+      setError(err.response?.data?.message || err.message || 'Failed to create payment intent');
       console.error('Payment creation error:', err);
     } finally {
       setLoading(false);
     }
-  };
-
-  // For testing without backend, you can use mock data
-  const handleMockPayment = () => {
-    const mockData = {
-      merchant_id: '1221149',  // Replace with your merchant ID
-      order_id: 'ORDER_' + Date.now(),
-      amount: '1000.00',
-      currency: 'LKR',
-      return_url: window.location.origin + '/payment/success',
-      cancel_url: window.location.origin + '/payment/cancel',
-      notify_url: 'http://localhost:5000/api/payment/notify',
-      hash: 'GENERATED_HASH_FROM_BACKEND',  // This should come from backend
-      first_name: 'John',
-      last_name: 'Doe',
-      email: 'john@example.com',
-      phone: '0771234567',
-      address: '123 Main Street',
-      city: 'Colombo',
-      country: 'Sri Lanka',
-      items: 'Test Product'
-    };
-    console.log('Setting mock payment data:', mockData);
-    setPaymentData(mockData);
   };
 
   console.log('Current paymentData state:', paymentData);
@@ -109,47 +102,82 @@ function App() {
     <div className="App">
       <div className="container">
         <h1>PayHere Sandbox Demo</h1>
-        <p className="subtitle">Test your PayHere payment integration</p>
-
-        <KafkaEventListener
-          isConnected={isConnected}
-          error={kafkaError}
-          isEnabled={kafkaEnabled}
-          onToggle={() => setKafkaEnabled(!kafkaEnabled)}
-        />
-
-        {lastEvent && (
-          <div className="event-notification">
-            ✅ Payment event received at {lastEvent}
-          </div>
-        )}
+        <p className="subtitle">Test your PayHere payment integration with direct backend call</p>
 
         {!paymentData ? (
-          <div className="button-group">
-            <button 
-              onClick={handleCreatePayment} 
-              disabled={loading}
-              className="btn btn-primary"
-            >
-              {loading ? 'Loading...' : 'Create Payment from Backend'}
-            </button>
-            
-            <button 
-              onClick={handleMockPayment}
-              className="btn btn-secondary"
-            >
-              Use Mock Data (Testing)
-            </button>
+          <>
+            <div className="request-form">
+              <h3>Payment Intent Request</h3>
 
-            {isConnected && (
+              <label>OrderId</label>
+              <input
+                name="OrderId"
+                value={requestForm.OrderId}
+                onChange={handleFormChange}
+                placeholder="ORDER_123"
+              />
+
+              <label>CustomerId (GUID)</label>
+              <input
+                name="CustomerId"
+                value={requestForm.CustomerId}
+                onChange={handleFormChange}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              />
+
+              <label>MerchantId (GUID)</label>
+              <input
+                name="MerchantId"
+                value={requestForm.MerchantId}
+                onChange={handleFormChange}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              />
+
+              <label>Amount</label>
+              <input
+                name="Amount"
+                type="number"
+                step="0.01"
+                min="0"
+                value={requestForm.Amount}
+                onChange={handleFormChange}
+                placeholder="1000.00"
+              />
+
+              <label>PaymentGatewayName</label>
+              <input
+                name="PaymentGatewayName"
+                value={requestForm.PaymentGatewayName}
+                onChange={handleFormChange}
+                placeholder="PAYHERE"
+              />
+
+              <label>Currency</label>
+              <input
+                name="Currency"
+                value={requestForm.Currency}
+                onChange={handleFormChange}
+                placeholder="LKR"
+              />
+            </div>
+
+            <div className="button-group">
               <button 
-                onClick={sendTestPaymentIntent}
-                className="btn btn-test"
+                onClick={handleCreatePayment} 
+                disabled={loading}
+                className="btn btn-primary"
               >
-                🧪 Send Test Event (SignalR)
+                {loading ? 'Loading...' : 'Create Payment Intent'}
               </button>
-            )}
-          </div>
+              
+              <button 
+                onClick={fillDummyData}
+                className="btn btn-secondary"
+              >
+                Fill Dummy Data
+              </button>
+            </div>
+          </>
         ) : (
           <PayHereCheckout 
             paymentData={paymentData}
@@ -166,10 +194,11 @@ function App() {
         <div className="info-box">
           <h3>Setup Instructions:</h3>
           <ol>
-            <li>Update the BACKEND_API_URL with your actual API endpoint</li>
-            <li>For testing, use the "Mock Data" button</li>
-            <li>Replace merchant_id with your PayHere merchant ID</li>
-            <li>Ensure hash is generated correctly on your backend</li>
+            <li>API URL is hardcoded to http://localhost:8085/v1/payments/paymentIntentCreate</li>
+            <li>Enter request values in the form or click Fill Dummy Data</li>
+            <li>Backend endpoint used: POST /v1/payments/paymentIntentCreate</li>
+            <li>CustomerId and MerchantId must be valid GUID values</li>
+            <li>Amount should be greater than zero</li>
           </ol>
         </div>
       </div>
