@@ -30,7 +30,7 @@ function App() {
   // SignalR Hub URL for real-time payment events
   const SIGNALR_HUB_URL =
     process.env.REACT_APP_SIGNALR_HUB_URL ||
-    '/payments/v1/hubs/payment';
+    '/payments/ws/hubs/payment';
 
   // Kafka event handler - receives payment intent and automatically redirects to PayHere
   const handleKafkaEvent = useCallback((eventData) => {
