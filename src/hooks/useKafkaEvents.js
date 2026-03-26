@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as signalR from '@microsoft/signalr';
+import { getAccessToken } from '../utils/authTokens';
 
 const useKafkaEvents = (hubUrl, eventType, onMessage) => {
   const [isConnected, setIsConnected] = useState(false);
@@ -12,21 +13,23 @@ const useKafkaEvents = (hubUrl, eventType, onMessage) => {
     const connect = async () => {
       try {
         console.log(`Connecting to SignalR hub: ${hubUrl}`);
-        
-        // Create SignalR connection
-        // HTTP/2 compatible configuration - let SignalR negotiate best transport
-        const connection = new signalR.HubConnectionBuilder()
-          .withUrl(hubUrl, {
-            skipNegotiation: false,
-            transport: signalR.HttpTransportType.WebSockets | 
-                      signalR.HttpTransportType.ServerSentEvents | 
-                      signalR.HttpTransportType.LongPolling
-          })
-          .withAutomaticReconnect()
-          .configureLogging(signalR.LogLevel.Information)
-          .build();
 
-        connectionRef.current = connection;
+        const buildConnection = (options) => (
+          new signalR.HubConnectionBuilder()
+            .withUrl(hubUrl, {
+              accessTokenFactory: () => getAccessToken() || '',
+              ...options
+            })
+            .withAutomaticReconnect()
+            .configureLogging(signalR.LogLevel.Information)
+            .build()
+        );
+
+        // Gateway-friendly mode: connect via WebSockets first and skip negotiate endpoint.
+        let connection = buildConnection({
+          skipNegotiation: true,
+          transport: signalR.HttpTransportType.WebSockets
+        });
 
         // Handle connection events (backend sends ConnectionEstablished)
         connection.on("ConnectionEstablished", (data) => {
@@ -152,7 +155,131 @@ const useKafkaEvents = (hubUrl, eventType, onMessage) => {
         });
 
         // Start the connection
-        await connection.start();
+        try {
+          await connection.start();
+        } catch (wsError) {
+          console.warn('WebSocket-only SignalR connection failed, retrying with negotiate flow...', wsError);
+
+          // Fallback when gateway does not support direct WS upgrades.
+          connection = buildConnection({
+            skipNegotiation: false,
+            transport: signalR.HttpTransportType.WebSockets |
+              signalR.HttpTransportType.ServerSentEvents |
+              signalR.HttpTransportType.LongPolling
+          });
+
+          connection.on("ConnectionEstablished", (data) => {
+            console.log('✅ Connected to SignalR hub:', data);
+            setIsConnected(true);
+            setError(null);
+          });
+
+          connection.on("SubscriptionConfirmed", (data) => {
+            console.log('🔔 Subscription confirmed:', data);
+          });
+
+          connection.on("PaymentIntentCreated", (data) => {
+            console.log('💳 PaymentIntentCreated event received:', data);
+            console.log('Raw data structure:', JSON.stringify(data, null, 2));
+
+            const gatewayData = data.gatewayData || data.GatewayData || {};
+            console.log('Extracted gatewayData:', gatewayData);
+
+            if (!gatewayData.merchant_id && !gatewayData.MerchantId) {
+              console.warn('⚠️ Received PaymentIntentCreated but no merchant_id found - ignoring');
+              return;
+            }
+
+            if (!gatewayData.order_id && !gatewayData.OrderId) {
+              console.warn('⚠️ Received PaymentIntentCreated but no order_id found - ignoring');
+              return;
+            }
+
+            const eventData = {
+              eventType: 'mydrive.v1.payment-intent-created',
+              timestamp: data.createdAt || data.CreatedAt,
+              payload: {
+                PaymentId: data.paymentId || data.PaymentId,
+                Status: data.status || data.Status,
+                GatewayData: {
+                  merchant_id: gatewayData.merchant_id || gatewayData.MerchantId || '',
+                  order_id: gatewayData.order_id || gatewayData.OrderId || '',
+                  amount: gatewayData.amount || gatewayData.Amount || '0',
+                  currency: gatewayData.currency || gatewayData.Currency || 'LKR',
+                  return_url: gatewayData.return_url || gatewayData.ReturnUrl || '',
+                  cancel_url: gatewayData.cancel_url || gatewayData.CancelUrl || '',
+                  notify_url: gatewayData.notify_url || gatewayData.NotifyUrl || '',
+                  hash: gatewayData.hash || gatewayData.Hash || ''
+                }
+              }
+            };
+
+            console.log('✅ Valid payment intent - Transformed eventData:', JSON.stringify(eventData, null, 2));
+            onMessage(eventData);
+          });
+
+          connection.on("PaymentIntentCreatedGlobal", (data) => {
+            console.log('🌍 PaymentIntentCreatedGlobal event received:', data);
+
+            const gatewayData = data.gatewayData || data.GatewayData || {};
+
+            if (!gatewayData.merchant_id && !gatewayData.MerchantId) {
+              console.warn('⚠️ Received PaymentIntentCreatedGlobal but no merchant_id found - ignoring');
+              return;
+            }
+
+            if (!gatewayData.order_id && !gatewayData.OrderId) {
+              console.warn('⚠️ Received PaymentIntentCreatedGlobal but no order_id found - ignoring');
+              return;
+            }
+
+            const eventData = {
+              eventType: 'mydrive.v1.payment-intent-created',
+              timestamp: data.createdAt || data.CreatedAt,
+              payload: {
+                PaymentId: data.paymentId || data.PaymentId,
+                Status: data.status || data.Status,
+                GatewayData: {
+                  merchant_id: gatewayData.merchant_id || gatewayData.MerchantId || '',
+                  order_id: gatewayData.order_id || gatewayData.OrderId || '',
+                  amount: gatewayData.amount || gatewayData.Amount || '0',
+                  currency: gatewayData.currency || gatewayData.Currency || 'LKR',
+                  return_url: gatewayData.return_url || gatewayData.ReturnUrl || '',
+                  cancel_url: gatewayData.cancel_url || gatewayData.CancelUrl || '',
+                  notify_url: gatewayData.notify_url || gatewayData.NotifyUrl || '',
+                  hash: gatewayData.hash || gatewayData.Hash || ''
+                }
+              }
+            };
+
+            console.log('✅ Valid global payment intent - triggering navigation');
+            onMessage(eventData);
+          });
+
+          connection.onreconnecting((error) => {
+            console.log('⚠️ Connection lost. Reconnecting...', error);
+            setIsConnected(false);
+            setError('Reconnecting...');
+          });
+
+          connection.onreconnected((connectionId) => {
+            console.log('✅ Reconnected! Connection ID:', connectionId);
+            setIsConnected(true);
+            setError(null);
+          });
+
+          connection.onclose((error) => {
+            console.log('❌ Connection closed:', error);
+            setIsConnected(false);
+            if (error) {
+              setError(error.message || 'Connection closed');
+            }
+          });
+
+          await connection.start();
+        }
+
+        connectionRef.current = connection;
         console.log('✅ Connected to SignalR hub');
         setIsConnected(true);
         setError(null);

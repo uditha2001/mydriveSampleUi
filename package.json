@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "PayHere Sandbox Integration Demo",
   "private": true,
+  "proxy": "http://localhost:8080",
   "dependencies": {
     "axios": "^1.6.0",
     "react": "^18.2.0",
